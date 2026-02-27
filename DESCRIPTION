@@ -1,0 +1,20 @@
+Package: phenokio
+Title: Automated Grain Morphometric Analysis and Seed Phenotyping
+Version: 0.1.0
+Authors@R: 
+    person("JK", "Kim", , "kimjk@agronomy4future.com", role = c("aut", "cre"))
+Description: A dedicated tool for high-throughput grain morphometric analysis and 
+    digital seed phenotyping. 'phenokio' provides a streamlined workflow to 
+    extract precise physical traits from seed images, including area, perimeter, 
+    length, and width. By bridging R and Python's OpenCV via 'reticulate', 
+    the package enables robust color-based segmentation with dual HSV thresholds 
+    specifically optimized for diverse grain types. It features advanced 
+    morphological operations and hole-filling algorithms to handle complex seed 
+    surfaces and hilum variations, providing agronomists and researchers with 
+    a fast, reproducible method to quantify seed size and shape for crops like 
+    soybeans, wheat, and rice.
+License: `use_mit_license()`, `use_gpl3_license()` or friends to pick a
+    license
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
