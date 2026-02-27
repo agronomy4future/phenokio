@@ -1,26 +1,38 @@
+# ============================================================
+# Package: phenokio
+# Title: Automated Grain Morphometric Analysis and Seed Phenotyping
+# Description: High-throughput grain analysis using R and OpenCV.
+# All Rights Reserved © J.K Kim (kimjk@agronomy4future.com)
+# Last updated on 02/27/2026
+# ============================================================
+
 if (!requireNamespace("reticulate", quietly = TRUE)) install.packages("reticulate")
 library(reticulate)
 
-ensure_pydeps= function() {
+#' Internal helper to ensure Python dependencies are installed
+ensure_pydeps <- function() {
   invisible(reticulate::py_available(initialize = TRUE))
-  for (pkg in c("numpy","pandas")) {
+  for (pkg in c("numpy", "pandas")) {
     if (!reticulate::py_module_available(pkg)) reticulate::py_install(pkg, pip = TRUE)
   }
   if (!reticulate::py_module_available("cv2")) reticulate::py_install("opencv-python-headless", pip = TRUE)
 }
 
-# --- simple BGR helper (optional; seeds usually keep one color) ---
-.resolve_color_bgr= function(col) {
+#' Resolve any R color name or BGR vector to OpenCV-compatible BGR
+.resolve_color_bgr <- function(col) {
+  # 1. If numeric vector c(B, G, R) is provided
   if (is.numeric(col) && length(col) == 3) return(as.integer(col))
-  if (!is.character(col) || length(col) != 1) stop("outline_color must be name or c(B,G,R)")
-  col= tolower(col)
-  pal= list(
-    green = c(0L,255L,0L), red = c(0L,0L,255L), blue = c(255L,0L,0L),
-    yellow = c(0L,255L,255L), white = c(255L,255L,255L),
-    gray = c(180L,180L,180L), black = c(0L,0L,0L)
-  )
-  if (!col %in% names(pal)) stop("Unknown outline_color: ", col)
-  pal[[col]]
+
+  # 2. Use R's internal color database to support all names (orange, pink, etc.)
+  rgb_val <- tryCatch(grDevices::col2rgb(col), error = function(e) NULL)
+
+  if (is.null(rgb_val)) {
+    message("Unknown color name. Defaulting to green.")
+    return(c(0L, 255L, 0L))
+  }
+
+  # Convert RGB to BGR for OpenCV
+  return(as.integer(rev(as.vector(rgb_val))))
 }
 #' Grain Morphometric Analysis from Digital Images
 #'
@@ -74,7 +86,7 @@ ensure_pydeps= function() {
 #' * Github: https://github.com/agronomy4future/phenokio
 #' # All Rights Reserved © J.K Kim (kimjk@agronomy4future.com)
 #' }
-phenokio= function(
+phenokio <- function(
     input_folder,
     output_folder,
     image_real_cm = c(20, 20),
@@ -82,26 +94,27 @@ phenokio= function(
     # --- segmentation (HSV) ---
     lower_hsv = c(0L, 0L, 0L),
     upper_hsv = c(180L, 255L, 255L),
-    extra_hsv = NULL,              # keep for rare cases (two-tone seeds)
+    extra_hsv = NULL,
 
     # --- border exclusion ---
     margin = 0L,
 
-    # --- morphology (most useful knobs for seeds) ---
+    # --- morphology ---
     k_open  = c(5L, 5L),
     k_close = c(7L, 7L),
     open_iter  = 1L,
     close_iter = 2L,
-    fill_holes = FALSE,            # seeds: often FALSE; set TRUE if dark pits split
+    fill_holes = FALSE,
 
-    # --- filtering ---
+    # --- filtering (Noise & Line prevention) ---
     min_component_area_px = 200L,
     object_min_area_cm2 = 0.01,
-    rel_min_frac_of_largest = 0.00, # 0 disables relative filter; use 0.05~0.15 if noisy
+    rel_min_frac_of_largest = 0.00,
+    max_aspect_ratio = 4.0,        # [New] If length/width > 4.0, it's likely a line, not a seed
     max_keep = 2000L,
 
-    # --- output overlay style (minimal) ---
-    outline_color = "green",
+    # --- output overlay style ---
+    outline_color = "green",       # Now supports "orange", "purple", "skyblue", etc.
     outline_thickness = 2L,
 
     ignore_processed_images = TRUE
@@ -111,9 +124,10 @@ phenokio= function(
   if (length(image_real_cm) == 1) image_real_cm <- rep(image_real_cm, 2)
   dir.create(output_folder, showWarnings = FALSE, recursive = TRUE)
 
-  outline_color_bgr= .resolve_color_bgr(outline_color)
+  # Support for ALL R color names
+  outline_color_bgr <- .resolve_color_bgr(outline_color)
 
-  py_code= "
+  py_code <- "
 import cv2
 import numpy as np
 import os, pandas as pd
@@ -122,247 +136,122 @@ import re
 
 def _as_uint8_triplet(x):
     arr = np.array(x, dtype=np.int64).reshape(-1)
-    if arr.size != 3:
-        raise ValueError('HSV must have 3 elements (H,S,V).')
     return np.clip(arr, 0, 255).astype(np.uint8)
 
 def _combine_hsv_masks(hsv_img, lower_hsv, upper_hsv, extra_hsv):
     base = cv2.inRange(hsv_img, _as_uint8_triplet(lower_hsv), _as_uint8_triplet(upper_hsv))
-    if extra_hsv is None:
-        return base
+    if extra_hsv is None: return base
     masks = [base]
-    try:
-        iterable = list(extra_hsv)
-    except Exception:
-        iterable = []
+    try: iterable = list(extra_hsv)
+    except: iterable = []
     for item in iterable:
-        lo = hi = None
         try:
-            lo = item.get('lower', None); hi = item.get('upper', None)
-        except Exception:
-            try:
-                lo = item[0]; hi = item[1]
-            except Exception:
-                pass
-        if lo is None or hi is None:
-            continue
-        m = cv2.inRange(hsv_img, _as_uint8_triplet(lo), _as_uint8_triplet(hi))
-        masks.append(m)
-
+            lo = item.get('lower', item[0]); hi = item.get('upper', item[1])
+            masks.append(cv2.inRange(hsv_img, _as_uint8_triplet(lo), _as_uint8_triplet(hi)))
+        except: continue
     out = masks[0]
-    for m in masks[1:]:
-        out = cv2.bitwise_or(out, m)
+    for m in masks[1:]: out = cv2.bitwise_or(out, m)
     return out
 
 def _apply_margin(mask, margin):
-    m = int(margin) if margin is not None else 0
-    if m <= 0:
-        return mask
-    out = mask.copy()
-    h, w = out.shape[:2]
-    out[:m, :] = 0
-    out[h-m:h, :] = 0
-    out[:, :m] = 0
-    out[:, w-m:w] = 0
-    return out
+    m = int(margin)
+    if m <= 0: return mask
+    h, w = mask.shape[:2]
+    mask[:m, :] = 0; mask[h-m:h, :] = 0
+    mask[:, :m] = 0; mask[:, w-m:w] = 0
+    return mask
 
 def _morph_open_close(mask, k_open, k_close, open_iter, close_iter):
-    out = mask
-    ko = tuple(int(x) for x in k_open)
-    kc = tuple(int(x) for x in k_close)
-    if ko[0] > 0 and ko[1] > 0 and int(open_iter) > 0:
-        ker_o = np.ones(ko, np.uint8)
-        out = cv2.morphologyEx(out, cv2.MORPH_OPEN, ker_o, iterations=int(open_iter))
-    if kc[0] > 0 and kc[1] > 0 and int(close_iter) > 0:
-        ker_c = np.ones(kc, np.uint8)
-        out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, ker_c, iterations=int(close_iter))
-    return out
+    if k_open[0] > 0:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones(tuple(k_open), np.uint8), iterations=int(open_iter))
+    if k_close[0] > 0:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones(tuple(k_close), np.uint8), iterations=int(close_iter))
+    return mask
 
 def _fill_holes(mask):
-    inv = cv2.bitwise_not(mask)
     h, w = mask.shape[:2]
-    flood = inv.copy()
+    flood = cv2.bitwise_not(mask)
     ffmask = np.zeros((h+2, w+2), dtype=np.uint8)
     cv2.floodFill(flood, ffmask, (0,0), 255)
-    flood_inv = cv2.bitwise_not(flood)
-    return cv2.bitwise_or(mask, flood_inv)
+    return cv2.bitwise_or(mask, cv2.bitwise_not(flood))
 
-def _is_processed_name(name_lower: str) -> bool:
-    return bool(re.search(r'_processed(\\b|\\s*\\(|_|-)', name_lower))
+def process_images(input_folder, output_folder, image_real_cm_W, image_real_cm_H,
+                   lower_hsv, upper_hsv, extra_hsv, margin, k_open, k_close,
+                   open_iter, close_iter, fill_holes, min_px, min_cm2, rel_frac,
+                   max_ar, max_keep, oc_bgr, ot, ignore_proc):
 
-def _collect_image_paths(input_folder, output_folder, ignore_processed_images=True):
-    in_dir  = Path(input_folder)
-    out_dir = Path(output_folder).resolve()
     exts = {'.jpg', '.jpeg', '.png'}
-    raw = []
-    for p in in_dir.iterdir():
-        if p.is_file() and p.suffix.lower() in exts:
-            raw.append(p)
-    seen = set()
-    paths = []
-    for p in raw:
-        try:
-            rp = p.resolve()
-        except Exception:
-            rp = p.absolute()
-        key = str(rp).lower()
-        try:
-            if out_dir in rp.parents or rp == out_dir:
-                continue
-        except Exception:
-            pass
-        if ignore_processed_images and _is_processed_name(rp.stem.lower()):
-            continue
-        if key in seen:
-            continue
-        seen.add(key)
-        paths.append(str(rp))
-    paths.sort()
-    return paths
-
-def _perimeter_cm_from_cnt(cnt, sx, sy):
-    c = cnt.reshape(-1, 2).astype(np.float64)
-    c_scaled = np.empty_like(c)
-    c_scaled[:,0] = c[:,0] * sx
-    c_scaled[:,1] = c[:,1] * sy
-    d = np.diff(np.vstack([c_scaled, c_scaled[0]]), axis=0)
-    seg_lens = np.sqrt((d[:,0]**2) + (d[:,1]**2))
-    return float(seg_lens.sum())
-
-def process_images(input_folder, output_folder,
-                   image_real_cm_W, image_real_cm_H,
-                   lower_hsv, upper_hsv, extra_hsv,
-                   margin,
-                   k_open, k_close, open_iter, close_iter,
-                   fill_holes,
-                   min_component_area_px,
-                   object_min_area_cm2,
-                   rel_min_frac_of_largest,
-                   max_keep,
-                   outline_color_bgr,
-                   outline_thickness,
-                   ignore_processed_images=True):
-
-    os.makedirs(output_folder, exist_ok=True)
-    image_paths = _collect_image_paths(input_folder, output_folder,
-                                      ignore_processed_images=bool(ignore_processed_images))
+    paths = [str(p) for p in Path(input_folder).iterdir() if p.suffix.lower() in exts]
     rows = []
 
-    for path in image_paths:
+    for path in paths:
         filename = os.path.basename(path)
-        image = cv2.imread(path)
-        if image is None:
-            continue
+        if ignore_proc and '_processed' in filename.lower(): continue
 
-        h, w = image.shape[:2]
-        area_per_pixel_cm2 = (float(image_real_cm_W) / float(w)) * (float(image_real_cm_H) / float(h))
-        sx = float(image_real_cm_W) / float(w)
-        sy = float(image_real_cm_H) / float(h)
+        img = cv2.imread(path)
+        if img is None: continue
+        h, w = img.shape[:2]
+        sx, sy = float(image_real_cm_W)/w, float(image_real_cm_H)/h
+        area_factor = sx * sy
 
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         mask = _combine_hsv_masks(hsv, lower_hsv, upper_hsv, extra_hsv)
         mask = _apply_margin(mask, margin)
         mask = _morph_open_close(mask, k_open, k_close, open_iter, close_iter)
-        if bool(fill_holes):
-            mask = _fill_holes(mask)
+        if fill_holes: mask = _fill_holes(mask)
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        # pixel area filter
-        contours = [c for c in contours if cv2.contourArea(c) >= float(min_component_area_px)]
-        if not contours:
-            out_img = os.path.join(output_folder, os.path.splitext(filename)[0] + '_processed.jpg')
-            cv2.imwrite(out_img, image)
-            continue
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # candidate list with cm2
         candidates = []
-        for c in contours:
-            apx = float(cv2.contourArea(c))
-            acm2 = apx * area_per_pixel_cm2
-            candidates.append((c, apx, acm2))
+        for c in cnts:
+            px_area = cv2.contourArea(c)
+            cm2_area = px_area * area_factor
+            if px_area < min_px or cm2_area < min_cm2: continue
 
-        # absolute cm2 filter
-        kept = [t for t in candidates if t[2] >= float(object_min_area_cm2)]
+            # Line filter: Aspect Ratio (Length/Width)
+            pts_cm = (c.reshape(-1, 2) * [sx, sy]).astype(np.float32)
+            rect = cv2.minAreaRect(pts_cm)
+            dim1, dim2 = rect[1]
+            if dim1 == 0 or dim2 == 0: continue
+            ar = max(dim1, dim2) / min(dim1, dim2)
 
-        # relative filter (optional)
-        if float(rel_min_frac_of_largest) > 0 and candidates:
-            largest_cm2 = max(t[2] for t in candidates)
-            kept = [t for t in kept if t[2] >= float(rel_min_frac_of_largest) * largest_cm2]
+            if ar > max_ar: continue # Skip if it looks like a line
+            candidates.append((c, cm2_area, max(dim1, dim2), min(dim1, dim2)))
 
-        kept.sort(key=lambda t: t[2], reverse=True)
-        kept = kept[:int(max_keep)]
-        contours = [t[0] for t in kept]
+        if rel_frac > 0 and candidates:
+            max_area = max(t[1] for t in candidates)
+            candidates = [t for t in candidates if t[1] >= rel_frac * max_area]
 
-        annotated = image.copy()
-        oc = tuple(int(v) for v in outline_color_bgr)
-        ot = int(outline_thickness)
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        candidates = candidates[:max_keep]
 
-        for idx, cnt in enumerate(contours, start=1):
-            obj_mask = np.zeros(mask.shape, dtype=np.uint8)
-            cv2.drawContours(obj_mask, [cnt], -1, 255, -1)
+        annotated = img.copy()
+        for idx, (cnt, area, l_cm, w_cm) in enumerate(candidates, 1):
+            cv2.drawContours(annotated, [cnt], -1, tuple(int(v) for v in oc_bgr), int(ot))
+            rows.append({'File': filename, 'Index': idx, 'Area_cm2': round(area, 3),
+                         'Width_cm': round(w_cm, 3), 'Length_cm': round(l_cm, 3)})
 
-            area_px = float(cv2.countNonZero(obj_mask))
-            area_cm2 = area_px * area_per_pixel_cm2
-            perim_cm = _perimeter_cm_from_cnt(cnt, sx, sy)
-
-            # rotated rect in CM for length/width
-            pts = cnt.reshape(-1, 2).astype(np.float32)
-            pts_cm = np.column_stack([pts[:,0] * sx, pts[:,1] * sy]).astype(np.float32)
-            rect_cm = cv2.minAreaRect(pts_cm)
-            (w_cm, h_cm) = rect_cm[1]
-            length_cm = float(max(w_cm, h_cm))
-            width_cm  = float(min(w_cm, h_cm))
-
-            cv2.drawContours(annotated, [cnt], -1, oc, ot)
-
-            rows.append({
-                'File': filename,
-                'Index_in_file': idx,
-                'Area_cm2': round(area_cm2, 3),
-                'Perimeter_cm': round(perim_cm, 3),
-                'Width_cm': round(width_cm, 3),
-                'Length_cm': round(length_cm, 3)
-            })
-
-        out_img = os.path.join(output_folder, os.path.splitext(filename)[0] + '_processed.jpg')
-        cv2.imwrite(out_img, annotated)
+        cv2.imwrite(os.path.join(output_folder, os.path.splitext(filename)[0] + '_processed.jpg'), annotated)
 
     df = pd.DataFrame(rows)
-
-    csv_path = os.path.join(output_folder, 'image_processed.csv')
-    cols = ['File','Index_in_file','Area_cm2','Perimeter_cm','Width_cm','Length_cm']
-    if len(df) > 0:
-        df = df.reindex(columns=cols)
-        df.to_csv(csv_path, index=False, encoding='utf-8-sig')
-    else:
-        pd.DataFrame(columns=cols).to_csv(csv_path, index=False, encoding='utf-8-sig')
-
+    df.to_csv(os.path.join(output_folder, 'image_processed.csv'), index=False, encoding='utf-8-sig')
     return df
 "
   reticulate::py_run_string(py_code)
 
-  ws= if (.Platform$OS.type == "windows") "\\" else "/"
-  in_path= normalizePath(input_folder,  winslash = ws, mustWork = FALSE)
-  out_path= normalizePath(output_folder, winslash = ws, mustWork = FALSE)
-
-  df= reticulate::py$process_images(
-    in_path,
-    out_path,
+  df <- reticulate::py$process_images(
+    normalizePath(input_folder, winslash = "/", mustWork = FALSE),
+    normalizePath(output_folder, winslash = "/", mustWork = FALSE),
     as.numeric(image_real_cm[1]), as.numeric(image_real_cm[2]),
     as.integer(lower_hsv), as.integer(upper_hsv), extra_hsv,
-    as.integer(margin),
-    as.integer(k_open), as.integer(k_close), as.integer(open_iter), as.integer(close_iter),
-    isTRUE(fill_holes),
-    as.integer(min_component_area_px),
-    as.numeric(object_min_area_cm2),
-    as.numeric(rel_min_frac_of_largest),
-    as.integer(max_keep),
-    as.integer(outline_color_bgr),
-    as.integer(outline_thickness),
-    isTRUE(ignore_processed_images)
+    as.integer(margin), as.integer(k_open), as.integer(k_close),
+    as.integer(open_iter), as.integer(close_iter), isTRUE(fill_holes),
+    as.integer(min_component_area_px), as.numeric(object_min_area_cm2),
+    as.numeric(rel_min_frac_of_largest), as.numeric(max_aspect_ratio),
+    as.integer(max_keep), as.integer(outline_color_bgr),
+    as.integer(outline_thickness), isTRUE(ignore_processed_images)
   )
 
-  reticulate::py_to_r(df)
+  return(reticulate::py_to_r(df))
 }
 # All Rights Reserved © J.K Kim (kimjk@agronomy4future.com). Last updated on 02/27/2026

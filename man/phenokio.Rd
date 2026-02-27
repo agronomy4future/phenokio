@@ -20,6 +20,7 @@ phenokio(
   min_component_area_px = 200L,
   object_min_area_cm2 = 0.01,
   rel_min_frac_of_largest = 0,
+  max_aspect_ratio = 4,
   max_keep = 2000L,
   outline_color = "green",
   outline_thickness = 2L,
