@@ -53,6 +53,14 @@ ensure_pydeps= function() {
 #'
 #' @examples
 #' \dontrun{
+#' # to install phenokio package
+#' if(!require(remotes)) install.packages("remotes")
+#' if (!requireNamespace("phenokio", quietly= TRUE)) {
+#'  remotes::install_github("agronomy4future/phenokio", force= TRUE)
+#' }
+#' library(remotes)
+#' library(phenokio)
+#'
 #' # Basic usage for soybean analysis
 #' phenokio(
 #'   input_folder= "path/to/images",
@@ -63,7 +71,8 @@ ensure_pydeps= function() {
 #'   fill_holes= TRUE,
 #'   outline_color= "red"
 #' )
-#' *Github: https://github.com/agronomy4future/phenokio
+#' * Github: https://github.com/agronomy4future/phenokio
+#' # All Rights Reserved © J.K Kim (kimjk@agronomy4future.com)
 #' }
 phenokio= function(
     input_folder,
